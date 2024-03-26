@@ -43,6 +43,11 @@ let
     parentsOf
     ;
 
+  isSymlink = entry:
+    entry.method == "symlink";
+  isBind = entry:
+    entry.method == "bind";
+
   cfg = config.environment.persistence;
   users = config.users.users;
   allPersistentStoragePaths = { directories = [ ]; files = [ ]; users = [ ]; }
@@ -67,7 +72,7 @@ let
 
   # Create all fileSystems bind mount entries for a specific
   # persistent storage path.
-  bindMounts = listToAttrs (map mkBindMountNameValuePair directories);
+  bindMounts = listToAttrs (map mkBindMountNameValuePair (filter isBind directories));
 in
 {
   options = {
@@ -86,6 +91,7 @@ in
             either
             str
             coercedTo
+            enum
             ;
         in
         attrsOf (
@@ -99,6 +105,13 @@ in
               };
               commonOpts = {
                 options = {
+                  method = mkOption {
+                    type = enum [ "bind" "symlink" ];
+                    default = "bind";
+                    description = ''
+                      Whether to use a bind mount or a plain symlink to persist this.
+                    '';
+                  };
                   persistentStoragePath = mkOption {
                     type = path;
                     default = cfg.${name}.persistentStoragePath;
@@ -480,7 +493,7 @@ in
   config = {
     systemd.services =
       let
-        mkPersistFileService = { filePath, persistentStoragePath, enableDebugging, ... }:
+        mkPersistFileService = { filePath, persistentStoragePath, enableDebugging, method, ... }:
           let
             targetFile = escapeShellArg (concatPaths [ persistentStoragePath filePath ]);
             mountPoint = escapeShellArg filePath;
@@ -495,7 +508,7 @@ in
               serviceConfig = {
                 Type = "oneshot";
                 RemainAfterExit = true;
-                ExecStart = "${mountFile} ${mountPoint} ${targetFile} ${escapeShellArg enableDebugging}";
+                ExecStart = "${mountFile} ${mountPoint} ${targetFile} ${escapeShellArg enableDebugging} ${escapeShellArg method}";
                 ExecStop = pkgs.writeShellScript "unbindOrUnlink-${escapeSystemdPath targetFile}" ''
                   set -eu
                   if [[ -L ${mountPoint} ]]; then
@@ -508,8 +521,10 @@ in
               };
             };
           };
+        mkPersistDirectoryService = { dirPath, ... }@args:
+          mkPersistFileService (args // { filePath = dirPath; });
       in
-      foldl' recursiveUpdate { } (map mkPersistFileService files);
+        foldl' recursiveUpdate { } ((map mkPersistFileService files) ++ (map mkPersistDirectoryService (filter isSymlink directories)));
 
     fileSystems = bindMounts;
     # So the mounts still make it into a VM built from `system.build.vm`
@@ -642,7 +657,7 @@ in
             exit $_status
           '';
 
-        mkPersistFile = { filePath, persistentStoragePath, enableDebugging, ... }:
+        mkPersistFile = { filePath, persistentStoragePath, enableDebugging, method, ... }:
           let
             mountPoint = filePath;
             targetFile = concatPaths [ persistentStoragePath filePath ];
@@ -650,6 +665,7 @@ in
               mountPoint
               targetFile
               enableDebugging
+              method
             ];
           in
           ''
